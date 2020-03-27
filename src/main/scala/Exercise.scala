@@ -51,20 +51,18 @@ object Exercise extends App {
   def exercise1(sc: SparkContext): Unit = {
     val rddWeather = sc.textFile("hdfs:/bigdata/dataset/weather-sample").map(WeatherData.extract)
 
+    //in this case repartition is the worst
+    val cacheRdd = rddWeather.coalesce(8).filter(_.temperature<999).map(x => (x.month, x.temperature)).cache
+    //nb no partition criteria, just number of partition for now
+
     // Average temperature for every month
-    rddWeather
-      .filter(_.temperature<999)
-      .map(x => (x.month, x.temperature))
+    cacheRdd
       .aggregateByKey((0.0,0.0))((a,v)=>(a._1+v,a._2+1),(a1,a2)=>(a1._1+a2._1,a1._2+a2._2))
       .map({case(k,v)=>(k,v._1/v._2)})
       .collect()
 
     // Maximum temperature for every month
-    rddWeather
-      .filter(_.temperature<999)
-      .map(x => (x.month, x.temperature))
-      .reduceByKey((x,y)=>{if(x<y) y else x})
-      .collect()
+    cacheRdd.reduceByKey((x,y)=>{if(x<y) y else x}).collect
   }
 
   /**
@@ -79,7 +77,7 @@ object Exercise extends App {
 
     // val rddS1 = rddStation.partitionBy(p).keyBy(x => x.usaf + x.wban).cache()
     // val rddS2 = rddStation.partitionBy(p).cache().keyBy(x => x.usaf + x.wban)
-    // val rddS3 = rddStation.keyBy(x => x.usaf + x.wban).partitionBy(p).cache()
+    val rddS3 = rddStation.keyBy(x => x.usaf + x.wban).partitionBy(p).cache() //ok
     // val rddS4 = rddStation.keyBy(x => x.usaf + x.wban).cache().partitionBy(p)
 
   }
@@ -107,7 +105,23 @@ object Exercise extends App {
     val rddWeather = sc.textFile("hdfs:/bigdata/dataset/weather-sample").map(WeatherData.extract)
     val rddStation = sc.textFile("hdfs:/bigdata/dataset/weather-info/stations.csv").map(StationData.extract)
 
-    // TODO exercise
+    import org.apache.spark.HashPartitioner
+    val p = new HashPartitioner(8)
+
+    val rddS = rddStation.keyBy(s => s.usaf + s.wban ).partitionBy(p)
+    val rddW = rddWeather.filter(_.temperature < 999).keyBy(s => s.usaf + s.wban ).partitionBy(p)
+    val rddJoinCached = rddW.join(rddS).cache
+
+    //The maximum temperature for every city
+    rddJoinCached.map{case (_, (w, s)) => (s.name, w.temperature)}
+      .reduceByKey((x,y)=>{if(x<y) y else x}).collect
+    // The maximum temperature for every city in Italy
+    val res2 = rddJoinCached.collect{case (_, (w, s)) if s.country == "IT" => (s.name, w.temperature)}
+        .reduceByKey((x,y)=>{if(x<y) y else x})
+    res2.collect
+
+    //Sort the results by descending temperature
+    res2.map({case(k,v)=>(v,k)}).sortByKey(ascending = false).map({case(k,v)=>(v,k)}).collect
   }
 
   /**
@@ -148,7 +162,7 @@ object Exercise extends App {
     val rddStation = sc.textFile("hdfs:/bigdata/dataset/weather-info/stations.csv").map(StationData.extract)
 
     val rddW = rddWeather
-      .sample(false,0.1)
+      .sample(withReplacement = false,0.1)
       .filter(_.temperature<999)
       .keyBy(x => x.usaf + x.wban)
       .cache()
@@ -165,7 +179,7 @@ object Exercise extends App {
     rddW
       .join(rddS)
       .filter(_._2._2.country=="IT")
-      .map({case(k,v)=>(v._2.name,v._1.temperature)})
+      .map({case(_,v)=>(v._2.name,v._1.temperature)})
       .reduceByKey((x,y)=>{if(x<y) y else x})
       .collect()
 
@@ -174,7 +188,7 @@ object Exercise extends App {
       .partitionBy(new HashPartitioner(8))
       .join(rddS)
       .filter(_._2._2.country=="IT")
-      .map({case(k,v)=>(v._2.name,v._1.temperature)})
+      .map({case(_,v)=>(v._2.name,v._1.temperature)})
       .reduceByKey((x,y)=>{if(x<y) y else x})
       .collect()
 
@@ -182,13 +196,15 @@ object Exercise extends App {
     val bRddS = sc.broadcast(rddS.collectAsMap())
     val rddJ = rddW
       .map({case (k,v) => (bRddS.value.get(k),v)})
-      .filter(_._1!=None)
-      .map({case(k,v)=>(k.get.asInstanceOf[StationData],v)})
+      .filter(f = _._1.isDefined)
+      .map({case(k,v)=>(k.get,v)})
     rddJ
       .filter(_._1.country=="IT")
       .map({case (k,v) => (k.name,v.temperature)})
       .reduceByKey((x,y)=>{if(x<y) y else x})
       .collect()
+
+    //The best solution is third, brawback all station copied in all executors => now just two.
   }
 
 }
